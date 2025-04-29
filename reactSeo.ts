@@ -7,11 +7,55 @@ interface ExportInfo {
   filename: string;
   content: string;
   sourceFile: string;
+  to?: string;
 }
 
-export default function htmlExport(): Plugin {
+interface SeoOptions {
+  sitemap?: {
+    enable?: boolean;
+    hostname?: string;
+    changefreq?: string;
+    priority?: string;
+  };
+  robots?: {
+    enable?: boolean;
+    rules?: Array<{
+      userAgent: string;
+      allow?: string[];
+      disallow?: string[];
+    }>;
+  };
+}
+
+export default function htmlExport(options: SeoOptions = {}): Plugin {
   const exportComponents: ExportInfo[] = [];
   let config: ResolvedConfig;
+  const generatedFiles: string[] = [];
+
+  const defaultOptions: SeoOptions = {
+    sitemap: {
+      enable: true,
+      hostname: "https://example.com",
+      changefreq: "weekly",
+      priority: "0.8",
+    },
+    robots: {
+      enable: true,
+      rules: [
+        {
+          userAgent: "*",
+          allow: ["/"],
+          disallow: ["/private/", "/admin/"],
+        },
+      ],
+    },
+  };
+
+  // Merge with default options
+  const seoOptions: SeoOptions = {
+    sitemap: { ...defaultOptions.sitemap, ...options.sitemap },
+    robots: { ...defaultOptions.robots, ...options.robots },
+  };
 
   return {
     name: "vite-plugin-html-export",
@@ -61,8 +105,14 @@ export default function htmlExport(): Plugin {
                     ? filenameMatch[1]
                     : baseFileName;
 
+                  // Extract 'to' attribute
+                  const toMatch = attributes.match(/to=["']([^"']+)["']/);
+                  const to = toMatch ? toMatch[1] : undefined;
+
                   console.log(
-                    `Found Export in ${file} with filename ${filename}`
+                    `Found Export in ${file} with filename ${filename}${
+                      to ? ` and to=${to}` : ""
+                    }`
                   );
 
                   // Store export info
@@ -70,6 +120,7 @@ export default function htmlExport(): Plugin {
                     filename,
                     content,
                     sourceFile: file,
+                    to,
                   });
                 }
 
@@ -119,8 +170,14 @@ export default function htmlExport(): Plugin {
           const filenameMatch = attributes.match(/filename=["']([^"']+)["']/);
           const filename = filenameMatch ? filenameMatch[1] : baseFileName;
 
+          // Extract 'to' attribute
+          const toMatch = attributes.match(/to=["']([^"']+)["']/);
+          const to = toMatch ? toMatch[1] : undefined;
+
           console.log(
-            `Transform: Found Export component in ${sourceFile} with filename: ${filename}`
+            `Transform: Found Export component in ${sourceFile} with filename: ${filename}${
+              to ? ` and to=${to}` : ""
+            }`
           );
 
           // Store the export info for later processing
@@ -128,6 +185,7 @@ export default function htmlExport(): Plugin {
             filename,
             content,
             sourceFile,
+            to,
           });
         }
 
@@ -147,12 +205,16 @@ export default function htmlExport(): Plugin {
         `CloseBundle: Found ${exportComponents.length} Export components`
       );
 
+      const outDir = path.resolve(config.root, "dist");
+      if (!fs.existsSync(outDir)) {
+        fs.mkdirSync(outDir, { recursive: true });
+      }
+
       if (exportComponents.length === 0) {
         console.log("No Export components found");
 
         // Fallback: directly create HTML files based on source files
         const srcDir = path.resolve(process.cwd(), "src");
-        const outDir = path.resolve(config.root, "dist");
 
         if (fs.existsSync(srcDir)) {
           const files = fs.readdirSync(srcDir);
@@ -178,6 +240,7 @@ export default function htmlExport(): Plugin {
 
                 const outputPath = path.resolve(outDir, `${baseFileName}.html`);
                 fs.writeFileSync(outputPath, htmlContent);
+                generatedFiles.push(`${baseFileName}.html`);
                 console.log(
                   `Generated fallback ${baseFileName}.html from ${file}`
                 );
@@ -187,37 +250,44 @@ export default function htmlExport(): Plugin {
             }
           }
         }
+      } else {
+        // Process each export component
+        for (const { filename, content, sourceFile, to } of exportComponents) {
+          try {
+            let processedContent = content;
 
-        return;
-      }
+            // Handle Link conversion if to="link" is specified
+            if (to === "link") {
+              console.log(`Converting Links to a tags for ${filename}.html`);
 
-      // Get the output directory
-      const outDir = path.resolve(config.root, "dist");
-      if (!fs.existsSync(outDir)) {
-        fs.mkdirSync(outDir, { recursive: true });
-      }
+              // Convert <Link to="..."> to <a href="...">
+              processedContent = processedContent.replace(
+                /<Link\s+to=["']([^"']+)["'](.*?)>([\s\S]*?)<\/Link>/g,
+                '<a href="$1"$2>$3</a>'
+              );
+            }
 
-      // Process each export component
-      for (const { filename, content, sourceFile } of exportComponents) {
-        try {
-          // Clean up the content - try to preserve actual HTML but remove React-specific code
-          const cleanedContent = content
-            .replace(/{/g, "<span data-placeholder>") // Replace JSX expressions with placeholders
-            .replace(/}/g, "</span>") // Close the placeholder spans
-            .replace(/\s+/g, " ") // Normalize whitespace
-            .trim();
+            // Clean up the content - try to preserve actual HTML but remove React-specific code
+            const cleanedContent = processedContent
+              .replace(/<SEO\s+metadata=\{[^}]+\}\s*\/?>.*?(?:<\/SEO>)?/g, "") // Remove SEO components
+              .replace(/{/g, "<span data-placeholder>") // Replace JSX expressions with placeholders
+              .replace(/}/g, "</span>") // Close the placeholder spans
+              .replace(/\s+/g, " ") // Normalize whitespace
+              .trim();
 
-          // Parse the content as HTML
-          const root = parse(`${cleanedContent}`);
+            // Parse the content as HTML
+            const root = parse(`${cleanedContent}`);
 
-          // Remove the placeholder spans
-          const placeholders = root.querySelectorAll("span[data-placeholder]");
-          placeholders.forEach((el) => {
-            el.remove();
-          });
+            // Remove the placeholder spans
+            const placeholders = root.querySelectorAll(
+              "span[data-placeholder]"
+            );
+            placeholders.forEach((el) => {
+              el.remove();
+            });
 
-          // Create the final HTML file
-          const htmlContent = `<!DOCTYPE html>
+            // Create the final HTML file
+            const htmlContent = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -229,12 +299,99 @@ export default function htmlExport(): Plugin {
 </body>
 </html>`;
 
-          // Write the file
-          const outputPath = path.resolve(outDir, `${filename}.html`);
-          fs.writeFileSync(outputPath, htmlContent);
-          console.log(`Generated ${filename}.html from ${sourceFile}`);
+            // Write the file
+            const outputPath = path.resolve(outDir, `${filename}.html`);
+            fs.writeFileSync(outputPath, htmlContent);
+            generatedFiles.push(`${filename}.html`);
+            console.log(
+              `Generated ${filename}.html from ${sourceFile}${
+                to ? ` with ${to} transformation` : ""
+              }`
+            );
+          } catch (err) {
+            console.error(`Error generating HTML for ${filename}:`, err);
+          }
+        }
+      }
+
+      // Generate robots.txt file
+      if (seoOptions.robots?.enable) {
+        try {
+          const robotsPath = path.resolve(outDir, "robots.txt");
+          let robotsContent = "";
+
+          if (seoOptions.robots.rules && seoOptions.robots.rules.length > 0) {
+            seoOptions.robots.rules.forEach((rule) => {
+              robotsContent += `User-agent: ${rule.userAgent}\n`;
+
+              if (rule.allow && rule.allow.length > 0) {
+                rule.allow.forEach((path) => {
+                  robotsContent += `Allow: ${path}\n`;
+                });
+              }
+
+              if (rule.disallow && rule.disallow.length > 0) {
+                rule.disallow.forEach((path) => {
+                  robotsContent += `Disallow: ${path}\n`;
+                });
+              }
+
+              robotsContent += "\n";
+            });
+          }
+
+          // Add sitemap reference
+          if (seoOptions.sitemap?.enable) {
+            robotsContent += `Sitemap: ${seoOptions.sitemap.hostname}/sitemap.xml\n`;
+          }
+
+          fs.writeFileSync(robotsPath, robotsContent);
+          console.log("Generated robots.txt");
         } catch (err) {
-          console.error(`Error generating HTML for ${filename}:`, err);
+          console.error("Error generating robots.txt:", err);
+        }
+      }
+
+      // Generate sitemap.xml
+      if (seoOptions.sitemap?.enable && generatedFiles.length > 0) {
+        try {
+          const sitemapPath = path.resolve(outDir, "sitemap.xml");
+          const hostname = seoOptions.sitemap.hostname || "https://example.com";
+          const changefreq = seoOptions.sitemap.changefreq || "weekly";
+          const priority = seoOptions.sitemap.priority || "0.8";
+          const currentDate = new Date().toISOString().split("T")[0];
+
+          let sitemapContent = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+`;
+
+          // Add root URL
+          sitemapContent += `  <url>
+    <loc>${hostname}/</loc>
+    <lastmod>${currentDate}</lastmod>
+    <changefreq>${changefreq}</changefreq>
+    <priority>1.0</priority>
+  </url>
+`;
+
+          // Add each generated HTML file
+          generatedFiles.forEach((file) => {
+            const urlPath = file === "index.html" ? "" : file;
+            sitemapContent += `  <url>
+    <loc>${hostname}/${urlPath}</loc>
+    <lastmod>${currentDate}</lastmod>
+    <changefreq>${changefreq}</changefreq>
+    <priority>${priority}</priority>
+  </url>
+`;
+          });
+
+          sitemapContent += "</urlset>";
+
+          fs.writeFileSync(sitemapPath, sitemapContent);
+          console.log("Generated sitemap.xml");
+        } catch (err) {
+          console.error("Error generating sitemap.xml:", err);
         }
       }
     },

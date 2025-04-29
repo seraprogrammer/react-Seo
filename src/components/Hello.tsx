@@ -1,4 +1,4 @@
-import { Export } from "./toHtml";
+import { Export } from "../toHtml";
 
 export default function Hello() {
   return (
